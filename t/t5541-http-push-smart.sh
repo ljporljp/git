@@ -6,11 +6,6 @@
 test_description='test smart pushing over http via http-backend'
 . ./test-lib.sh
 
-if test -n "$NO_CURL"; then
-	skip_all='skipping test, git built without http support'
-	test_done
-fi
-
 ROOT_PATH="$PWD"
 . "$TEST_DIRECTORY"/lib-gpg.sh
 . "$TEST_DIRECTORY"/lib-httpd.sh
@@ -79,7 +74,7 @@ test_expect_success 'push to remote repository (standard)' '
 	test_tick &&
 	git commit -m path2 &&
 	HEAD=$(git rev-parse --verify HEAD) &&
-	GIT_CURL_VERBOSE=1 git push -v -v 2>err &&
+	GIT_TRACE_CURL=true git push -v -v 2>err &&
 	! grep "Expect: 100-continue" err &&
 	grep "POST git-receive-pack ([0-9]* bytes)" err &&
 	(cd "$HTTPD_DOCUMENT_ROOT_PATH"/test_repo.git &&
@@ -124,7 +119,7 @@ test_expect_success 'rejected update prints status' '
 	git commit -m dev2 &&
 	test_must_fail git push origin dev2 2>act &&
 	sed -e "/^remote: /s/ *$//" <act >cmp &&
-	test_cmp exp cmp
+	test_i18ncmp exp cmp
 '
 rm -f "$HTTPD_DOCUMENT_ROOT_PATH/test_repo.git/hooks/update"
 
@@ -224,7 +219,7 @@ test_expect_success TTY 'push shows progress when stderr is a tty' '
 	cd "$ROOT_PATH"/test_repo_clone &&
 	test_commit noisy &&
 	test_terminal git push >output 2>&1 &&
-	grep "^Writing objects" output
+	test_i18ngrep "^Writing objects" output
 '
 
 test_expect_success TTY 'push --quiet silences status and progress' '
@@ -238,16 +233,16 @@ test_expect_success TTY 'push --no-progress silences progress but not status' '
 	cd "$ROOT_PATH"/test_repo_clone &&
 	test_commit no-progress &&
 	test_terminal git push --no-progress >output 2>&1 &&
-	grep "^To http" output &&
-	! grep "^Writing objects"
+	test_i18ngrep "^To http" output &&
+	test_i18ngrep ! "^Writing objects"
 '
 
 test_expect_success 'push --progress shows progress to non-tty' '
 	cd "$ROOT_PATH"/test_repo_clone &&
 	test_commit progress &&
 	git push --progress >output 2>&1 &&
-	grep "^To http" output &&
-	grep "^Writing objects" output
+	test_i18ngrep "^To http" output &&
+	test_i18ngrep "^Writing objects" output
 '
 
 test_expect_success 'http push gives sane defaults to reflog' '
@@ -371,6 +366,15 @@ test_expect_success GPG 'push with post-receive to inspect certificate' '
 		sed -n -e "s/^nonce /NONCE=/p" -e "/^$/q" push-cert
 	) >expect &&
 	test_cmp expect "$HTTPD_DOCUMENT_ROOT_PATH/push-cert-status"
+'
+
+test_expect_success 'push status output scrubs password' '
+	cd "$ROOT_PATH/test_repo_clone" &&
+	git push --porcelain \
+		"$HTTPD_URL_USER_PASS/smart/test_repo.git" \
+		+HEAD:scrub >status &&
+	# should have been scrubbed down to vanilla URL
+	grep "^To $HTTPD_URL/smart/test_repo.git" status
 '
 
 stop_httpd

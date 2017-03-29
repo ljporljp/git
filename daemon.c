@@ -1,6 +1,5 @@
 #include "cache.h"
 #include "pkt-line.h"
-#include "exec_cmd.h"
 #include "run-command.h"
 #include "strbuf.h"
 #include "string-list.h"
@@ -32,7 +31,7 @@ static const char daemon_usage[] =
 "           [<directory>...]";
 
 /* List of acceptable pathname prefixes */
-static char **ok_paths;
+static const char **ok_paths;
 static int strict_paths;
 
 /* If this is set, git-daemon-export-ok is not required */
@@ -161,6 +160,7 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 {
 	static char rpath[PATH_MAX];
 	static char interp_path[PATH_MAX];
+	size_t rlen;
 	const char *path;
 	const char *dir;
 
@@ -188,8 +188,12 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 			namlen = slash - dir;
 			restlen -= namlen;
 			loginfo("userpath <%s>, request <%s>, namlen %d, restlen %d, slash <%s>", user_path, dir, namlen, restlen, slash);
-			snprintf(rpath, PATH_MAX, "%.*s/%s%.*s",
-				 namlen, dir, user_path, restlen, slash);
+			rlen = snprintf(rpath, sizeof(rpath), "%.*s/%s%.*s",
+					namlen, dir, user_path, restlen, slash);
+			if (rlen >= sizeof(rpath)) {
+				logerror("user-path too large: %s", rpath);
+				return NULL;
+			}
 			dir = rpath;
 		}
 	}
@@ -208,7 +212,15 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 
 		strbuf_expand(&expanded_path, interpolated_path,
 			      expand_path, &context);
-		strlcpy(interp_path, expanded_path.buf, PATH_MAX);
+
+		rlen = strlcpy(interp_path, expanded_path.buf,
+			       sizeof(interp_path));
+		if (rlen >= sizeof(interp_path)) {
+			logerror("interpolated path too large: %s",
+				 interp_path);
+			return NULL;
+		}
+
 		strbuf_release(&expanded_path);
 		loginfo("Interpolated dir '%s'", interp_path);
 
@@ -220,7 +232,11 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 			logerror("'%s': Non-absolute path denied (base-path active)", dir);
 			return NULL;
 		}
-		snprintf(rpath, PATH_MAX, "%s%s", base_path, dir);
+		rlen = snprintf(rpath, sizeof(rpath), "%s%s", base_path, dir);
+		if (rlen >= sizeof(rpath)) {
+			logerror("base-path too large: %s", rpath);
+			return NULL;
+		}
 		dir = rpath;
 	}
 
@@ -240,7 +256,7 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 	}
 
 	if ( ok_paths && *ok_paths ) {
-		char **pp;
+		const char **pp;
 		int pathlen = strlen(path);
 
 		/* The validation is done on the paths after enter_repo
@@ -282,7 +298,7 @@ static int daemon_error(const char *dir, const char *msg)
 {
 	if (!informative_errors)
 		msg = "access denied or repository not exported";
-	packet_write(1, "ERR %s: %s", msg, dir);
+	packet_write_fmt(1, "ERR %s: %s", msg, dir);
 	return -1;
 }
 
@@ -424,7 +440,7 @@ static void copy_to_log(int fd)
 		return;
 	}
 
-	while (strbuf_getline(&line, fp, '\n') != EOF) {
+	while (strbuf_getline_lf(&line, fp) != EOF) {
 		logerror("%s", line.buf);
 		strbuf_setlen(&line, 0);
 	}
@@ -633,7 +649,7 @@ static void lookup_hostname(struct hostinfo *hi)
 		char **ap;
 		static char addrbuf[HOST_NAME_MAX + 1];
 
-		hent = gethostbyname(hostname.buf);
+		hent = gethostbyname(hi->hostname.buf);
 		if (hent) {
 			ap = hent->h_addr_list;
 			memset(&sa, 0, sizeof sa);
@@ -669,6 +685,17 @@ static void hostinfo_clear(struct hostinfo *hi)
 	strbuf_release(&hi->tcp_port);
 }
 
+static void set_keep_alive(int sockfd)
+{
+	int ka = 1;
+
+	if (setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka)) < 0) {
+		if (errno != ENOTSOCK)
+			logerror("unable to set SO_KEEPALIVE on socket: %s",
+				strerror(errno));
+	}
+}
+
 static int execute(void)
 {
 	char *line = packet_buffer;
@@ -681,6 +708,7 @@ static int execute(void)
 	if (addr)
 		loginfo("Connection from %s:%s", addr, port);
 
+	set_keep_alive(0);
 	alarm(init_timeout ? init_timeout : timeout);
 	pktlen = packet_read(0, NULL, NULL, packet_buffer, sizeof(packet_buffer), 0);
 	alarm(0);
@@ -802,17 +830,16 @@ static void check_dead_children(void)
 			/* remove the child */
 			*cradle = blanket->next;
 			live_children--;
+			child_process_clear(&blanket->cld);
 			free(blanket);
 		} else
 			cradle = &blanket->next;
 }
 
-static char **cld_argv;
+static struct argv_array cld_argv = ARGV_ARRAY_INIT;
 static void handle(int incoming, struct sockaddr *addr, socklen_t addrlen)
 {
 	struct child_process cld = CHILD_PROCESS_INIT;
-	char addrbuf[300] = "REMOTE_ADDR=", portbuf[300];
-	char *env[] = { addrbuf, portbuf, NULL };
 
 	if (max_connections && live_children >= max_connections) {
 		kill_some_child();
@@ -826,28 +853,24 @@ static void handle(int incoming, struct sockaddr *addr, socklen_t addrlen)
 	}
 
 	if (addr->sa_family == AF_INET) {
+		char buf[128] = "";
 		struct sockaddr_in *sin_addr = (void *) addr;
-		inet_ntop(addr->sa_family, &sin_addr->sin_addr, addrbuf + 12,
-		    sizeof(addrbuf) - 12);
-		snprintf(portbuf, sizeof(portbuf), "REMOTE_PORT=%d",
-		    ntohs(sin_addr->sin_port));
+		inet_ntop(addr->sa_family, &sin_addr->sin_addr, buf, sizeof(buf));
+		argv_array_pushf(&cld.env_array, "REMOTE_ADDR=%s", buf);
+		argv_array_pushf(&cld.env_array, "REMOTE_PORT=%d",
+				 ntohs(sin_addr->sin_port));
 #ifndef NO_IPV6
 	} else if (addr->sa_family == AF_INET6) {
+		char buf[128] = "";
 		struct sockaddr_in6 *sin6_addr = (void *) addr;
-
-		char *buf = addrbuf + 12;
-		*buf++ = '['; *buf = '\0'; /* stpcpy() is cool */
-		inet_ntop(AF_INET6, &sin6_addr->sin6_addr, buf,
-		    sizeof(addrbuf) - 13);
-		strcat(buf, "]");
-
-		snprintf(portbuf, sizeof(portbuf), "REMOTE_PORT=%d",
-		    ntohs(sin6_addr->sin6_port));
+		inet_ntop(AF_INET6, &sin6_addr->sin6_addr, buf, sizeof(buf));
+		argv_array_pushf(&cld.env_array, "REMOTE_ADDR=[%s]", buf);
+		argv_array_pushf(&cld.env_array, "REMOTE_PORT=%d",
+				 ntohs(sin6_addr->sin6_port));
 #endif
 	}
 
-	cld.env = (const char **)env;
-	cld.argv = (const char **)cld_argv;
+	cld.argv = cld_argv.argv;
 	cld.in = incoming;
 	cld.out = dup(incoming);
 
@@ -901,7 +924,7 @@ static const char *ip2str(int family, struct sockaddr *sin, socklen_t len)
 		inet_ntop(family, &((struct sockaddr_in*)sin)->sin_addr, ip, len);
 		break;
 	default:
-		strcpy(ip, "<unknown>");
+		xsnprintf(ip, sizeof(ip), "<unknown>");
 	}
 	return ip;
 }
@@ -916,7 +939,7 @@ static int setup_named_sock(char *listen_addr, int listen_port, struct socketlis
 	int gai;
 	long flags;
 
-	sprintf(pbuf, "%d", listen_port);
+	xsnprintf(pbuf, sizeof(pbuf), "%d", listen_port);
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
@@ -955,6 +978,8 @@ static int setup_named_sock(char *listen_addr, int listen_port, struct socketlis
 			close(sockfd);
 			continue;
 		}
+
+		set_keep_alive(sockfd);
 
 		if (bind(sockfd, ai->ai_addr, ai->ai_addrlen) < 0) {
 			logerror("Could not bind to %s: %s",
@@ -1014,6 +1039,8 @@ static int setup_named_sock(char *listen_addr, int listen_port, struct socketlis
 		close(sockfd);
 		return 0;
 	}
+
+	set_keep_alive(sockfd);
 
 	if ( bind(sockfd, (struct sockaddr *)&sin, sizeof sin) < 0 ) {
 		logerror("Could not bind to %s: %s",
@@ -1166,15 +1193,6 @@ static struct credentials *prepare_credentials(const char *user_name,
 }
 #endif
 
-static void store_pid(const char *path)
-{
-	FILE *f = fopen(path, "w");
-	if (!f)
-		die_errno("cannot open pid file '%s'", path);
-	if (fprintf(f, "%"PRIuMAX"\n", (uintmax_t) getpid()) < 0 || fclose(f) != 0)
-		die_errno("failed to write pid file '%s'", path);
-}
-
 static int serve(struct string_list *listen_addr, int listen_port,
     struct credentials *cred)
 {
@@ -1192,7 +1210,7 @@ static int serve(struct string_list *listen_addr, int listen_port,
 	return service_loop(&socklist);
 }
 
-int main(int argc, char **argv)
+int cmd_main(int argc, const char **argv)
 {
 	int listen_port = 0;
 	struct string_list listen_addr = STRING_LIST_INIT_NODUP;
@@ -1202,12 +1220,8 @@ int main(int argc, char **argv)
 	struct credentials *cred = NULL;
 	int i;
 
-	git_setup_gettext();
-
-	git_extract_argv0_path(argv[0]);
-
 	for (i = 1; i < argc; i++) {
-		char *arg = argv[i];
+		const char *arg = argv[i];
 		const char *v;
 
 		if (skip_prefix(arg, "--listen=", &v)) {
@@ -1381,19 +1395,16 @@ int main(int argc, char **argv)
 	if (detach) {
 		if (daemonize())
 			die("--detach not supported on this platform");
-	} else
-		sanitize_stdfds();
+	}
 
 	if (pid_file)
-		store_pid(pid_file);
+		write_file(pid_file, "%"PRIuMAX, (uintmax_t) getpid());
 
 	/* prepare argv for serving-processes */
-	cld_argv = xmalloc(sizeof (char *) * (argc + 2));
-	cld_argv[0] = argv[0];	/* git-daemon */
-	cld_argv[1] = "--serve";
+	argv_array_push(&cld_argv, argv[0]); /* git-daemon */
+	argv_array_push(&cld_argv, "--serve");
 	for (i = 1; i < argc; ++i)
-		cld_argv[i+1] = argv[i];
-	cld_argv[argc+1] = NULL;
+		argv_array_push(&cld_argv, argv[i]);
 
 	return serve(&listen_addr, listen_port, cred);
 }

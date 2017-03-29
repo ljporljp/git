@@ -6,7 +6,6 @@
 #include "reachable.h"
 #include "parse-options.h"
 #include "progress.h"
-#include "dir.h"
 
 static const char * const prune_usage[] = {
 	N_("git prune [-n] [-v] [--expire <time>] [--] [<head>...]"),
@@ -31,7 +30,7 @@ static int prune_tmp_file(const char *fullpath)
 	return 0;
 }
 
-static int prune_object(const unsigned char *sha1, const char *fullpath,
+static int prune_object(const struct object_id *oid, const char *fullpath,
 			void *data)
 {
 	struct stat st;
@@ -40,7 +39,7 @@ static int prune_object(const unsigned char *sha1, const char *fullpath,
 	 * Do we know about this object?
 	 * It must have been reachable
 	 */
-	if (lookup_object(sha1))
+	if (lookup_object(oid->hash))
 		return 0;
 
 	if (lstat(fullpath, &st)) {
@@ -51,8 +50,8 @@ static int prune_object(const unsigned char *sha1, const char *fullpath,
 	if (st.st_mtime > expire)
 		return 0;
 	if (show_only || verbose) {
-		enum object_type type = sha1_object_info(sha1, NULL);
-		printf("%s %s\n", sha1_to_hex(sha1),
+		enum object_type type = sha1_object_info(oid->hash, NULL);
+		printf("%s %s\n", oid_to_hex(oid),
 		       (type > 0) ? typename(type) : "unknown");
 	}
 	if (!show_only)
@@ -119,6 +118,10 @@ int cmd_prune(int argc, const char **argv, const char *prefix)
 	init_revisions(&revs, prefix);
 
 	argc = parse_options(argc, argv, prefix, options, prune_usage, 0);
+
+	if (repository_format_precious_objects)
+		die(_("cannot prune in a precious-objects repo"));
+
 	while (argc--) {
 		unsigned char sha1[20];
 		const char *name = *argv++;

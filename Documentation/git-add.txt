@@ -11,7 +11,7 @@ SYNOPSIS
 'git add' [--verbose | -v] [--dry-run | -n] [--force | -f] [--interactive | -i] [--patch | -p]
 	  [--edit | -e] [--[no-]all | --[no-]ignore-removal | [--update | -u]]
 	  [--intent-to-add | -N] [--refresh] [--ignore-errors] [--ignore-missing]
-	  [--] [<pathspec>...]
+	  [--chmod=(+|-)x] [--] [<pathspec>...]
 
 DESCRIPTION
 -----------
@@ -24,7 +24,7 @@ remove paths that do not exist in the working tree anymore.
 
 The "index" holds a snapshot of the content of the working tree, and it
 is this snapshot that is taken as the contents of the next commit.  Thus
-after making any changes to the working directory, and before running
+after making any changes to the working tree, and before running
 the commit command, you must use the `add` command to add any new or
 modified files to the index.
 
@@ -93,7 +93,8 @@ This effectively runs `add --interactive`, but bypasses the
 initial command menu and directly jumps to the `patch` subcommand.
 See ``Interactive mode'' for details.
 
--e, \--edit::
+-e::
+--edit::
 	Open the diff vs. the index in an editor and let the user
 	edit it.  After the editor was closed, adjust the hunk headers
 	and apply the patch to the index.
@@ -163,6 +164,11 @@ for "git add --no-all <pathspec>...", i.e. ignored removed files.
 	this option the user can check if any of the given files would
 	be ignored, no matter if they are already present in the work
 	tree or not.
+
+--chmod=(+|-)x::
+	Override the executable bit of the added files.  The executable
+	bit is only changed in the index, the files on disk are left
+	unchanged.
 
 \--::
 	This option can be used to separate command-line options from

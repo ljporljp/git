@@ -36,7 +36,7 @@ static int update_info_file(char *path, int (*generate)(FILE *))
 
 out:
 	if (ret) {
-		error("unable to update %s: %s", path, strerror(errno));
+		error_errno("unable to update %s", path);
 		if (fp)
 			fclose(fp);
 		else if (fd >= 0)
@@ -47,21 +47,22 @@ out:
 	return ret;
 }
 
-static int add_info_ref(const char *path, const unsigned char *sha1, int flag, void *cb_data)
+static int add_info_ref(const char *path, const struct object_id *oid,
+			int flag, void *cb_data)
 {
 	FILE *fp = cb_data;
-	struct object *o = parse_object(sha1);
+	struct object *o = parse_object(oid->hash);
 	if (!o)
 		return -1;
 
-	if (fprintf(fp, "%s	%s\n", sha1_to_hex(sha1), path) < 0)
+	if (fprintf(fp, "%s	%s\n", oid_to_hex(oid), path) < 0)
 		return -1;
 
 	if (o->type == OBJ_TAG) {
 		o = deref_tag(o, path, 0);
 		if (o)
 			if (fprintf(fp, "%s	%s^{}\n",
-				sha1_to_hex(o->sha1), path) < 0)
+				oid_to_hex(&o->oid), path) < 0)
 				return -1;
 	}
 	return 0;
@@ -228,7 +229,7 @@ static void init_pack_info(const char *infofile, int force)
 	}
 
 	/* renumber them */
-	qsort(info, num_pack, sizeof(info[0]), compare_info);
+	QSORT(info, num_pack, compare_info);
 	for (i = 0; i < num_pack; i++)
 		info[i]->new_num = i;
 }

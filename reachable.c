@@ -22,11 +22,18 @@ static void update_progress(struct connectivity_progress *cp)
 		display_progress(cp->progress, cp->count);
 }
 
-static int add_one_ref(const char *path, const unsigned char *sha1, int flag, void *cb_data)
+static int add_one_ref(const char *path, const struct object_id *oid,
+		       int flag, void *cb_data)
 {
-	struct object *object = parse_object_or_die(sha1, path);
 	struct rev_info *revs = (struct rev_info *)cb_data;
+	struct object *object;
 
+	if ((flag & REF_ISSYMREF) && (flag & REF_ISBROKEN)) {
+		warning("symbolic ref is dangling: %s", path);
+		return 0;
+	}
+
+	object = parse_object_or_die(oid->hash, path);
 	add_pending_object(revs, object, "");
 
 	return 0;
@@ -36,15 +43,14 @@ static int add_one_ref(const char *path, const unsigned char *sha1, int flag, vo
  * The traversal will have already marked us as SEEN, so we
  * only need to handle any progress reporting here.
  */
-static void mark_object(struct object *obj, const struct name_path *path,
-			const char *name, void *data)
+static void mark_object(struct object *obj, const char *name, void *data)
 {
 	update_progress(data);
 }
 
 static void mark_commit(struct commit *c, void *data)
 {
-	mark_object(&c->object, NULL, NULL, data);
+	mark_object(&c->object, NULL, data);
 }
 
 struct recent_data {
@@ -52,7 +58,7 @@ struct recent_data {
 	unsigned long timestamp;
 };
 
-static void add_recent_object(const unsigned char *sha1,
+static void add_recent_object(const struct object_id *oid,
 			      unsigned long mtime,
 			      struct recent_data *data)
 {
@@ -69,37 +75,37 @@ static void add_recent_object(const unsigned char *sha1,
 	 * later processing, and the revision machinery expects
 	 * commits and tags to have been parsed.
 	 */
-	type = sha1_object_info(sha1, NULL);
+	type = sha1_object_info(oid->hash, NULL);
 	if (type < 0)
-		die("unable to get object info for %s", sha1_to_hex(sha1));
+		die("unable to get object info for %s", oid_to_hex(oid));
 
 	switch (type) {
 	case OBJ_TAG:
 	case OBJ_COMMIT:
-		obj = parse_object_or_die(sha1, NULL);
+		obj = parse_object_or_die(oid->hash, NULL);
 		break;
 	case OBJ_TREE:
-		obj = (struct object *)lookup_tree(sha1);
+		obj = (struct object *)lookup_tree(oid->hash);
 		break;
 	case OBJ_BLOB:
-		obj = (struct object *)lookup_blob(sha1);
+		obj = (struct object *)lookup_blob(oid->hash);
 		break;
 	default:
 		die("unknown object type for %s: %s",
-		    sha1_to_hex(sha1), typename(type));
+		    oid_to_hex(oid), typename(type));
 	}
 
 	if (!obj)
-		die("unable to lookup %s", sha1_to_hex(sha1));
+		die("unable to lookup %s", oid_to_hex(oid));
 
 	add_pending_object(data->revs, obj, "");
 }
 
-static int add_recent_loose(const unsigned char *sha1,
+static int add_recent_loose(const struct object_id *oid,
 			    const char *path, void *data)
 {
 	struct stat st;
-	struct object *obj = lookup_object(sha1);
+	struct object *obj = lookup_object(oid->hash);
 
 	if (obj && obj->flags & SEEN)
 		return 0;
@@ -113,23 +119,22 @@ static int add_recent_loose(const unsigned char *sha1,
 		 */
 		if (errno == ENOENT)
 			return 0;
-		return error("unable to stat %s: %s",
-			     sha1_to_hex(sha1), strerror(errno));
+		return error_errno("unable to stat %s", oid_to_hex(oid));
 	}
 
-	add_recent_object(sha1, st.st_mtime, data);
+	add_recent_object(oid, st.st_mtime, data);
 	return 0;
 }
 
-static int add_recent_packed(const unsigned char *sha1,
+static int add_recent_packed(const struct object_id *oid,
 			     struct packed_git *p, uint32_t pos,
 			     void *data)
 {
-	struct object *obj = lookup_object(sha1);
+	struct object *obj = lookup_object(oid->hash);
 
 	if (obj && obj->flags & SEEN)
 		return 0;
-	add_recent_object(sha1, p->mtime, data);
+	add_recent_object(oid, p->mtime, data);
 	return 0;
 }
 
@@ -142,10 +147,12 @@ int add_unseen_recent_objects_to_traversal(struct rev_info *revs,
 	data.revs = revs;
 	data.timestamp = timestamp;
 
-	r = for_each_loose_object(add_recent_loose, &data);
+	r = for_each_loose_object(add_recent_loose, &data,
+				  FOR_EACH_OBJECT_LOCAL_ONLY);
 	if (r)
 		return r;
-	return for_each_packed_object(add_recent_packed, &data);
+	return for_each_packed_object(add_recent_packed, &data,
+				      FOR_EACH_OBJECT_LOCAL_ONLY);
 }
 
 void mark_reachable_objects(struct rev_info *revs, int mark_reflog,

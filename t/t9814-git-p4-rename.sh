@@ -141,7 +141,7 @@ test_expect_success 'detect copies' '
 		git diff-tree -r -C HEAD &&
 		git p4 submit &&
 		p4 filelog //depot/file8 &&
-		p4 filelog //depot/file8 | test_must_fail grep -q "branch from" &&
+		! p4 filelog //depot/file8 | grep -q "branch from" &&
 
 		echo "file9" >>file2 &&
 		git commit -a -m "Differentiate file2" &&
@@ -154,7 +154,7 @@ test_expect_success 'detect copies' '
 		git config git-p4.detectCopies true &&
 		git p4 submit &&
 		p4 filelog //depot/file9 &&
-		p4 filelog //depot/file9 | test_must_fail grep -q "branch from" &&
+		! p4 filelog //depot/file9 | grep -q "branch from" &&
 
 		echo "file10" >>file2 &&
 		git commit -a -m "Differentiate file2" &&
@@ -202,7 +202,7 @@ test_expect_success 'detect copies' '
 		git config git-p4.detectCopies $(($level + 2)) &&
 		git p4 submit &&
 		p4 filelog //depot/file12 &&
-		p4 filelog //depot/file12 | test_must_fail grep -q "branch from" &&
+		! p4 filelog //depot/file12 | grep -q "branch from" &&
 
 		echo "file13" >>file2 &&
 		git commit -a -m "Differentiate file2" &&
@@ -226,14 +226,9 @@ test_expect_success 'detect copies' '
 
 # See if configurables can be set, and in particular if the run.move.allow
 # variable exists, which allows admins to disable the "p4 move" command.
-test_expect_success 'p4 configure command and run.move.allow are available' '
-	p4 configure show run.move.allow >out ; retval=$? &&
-	test $retval = 0 &&
-	{
-		egrep ^run.move.allow: out &&
-		test_set_prereq P4D_HAVE_CONFIGURABLE_RUN_MOVE_ALLOW ||
-		true
-	} || true
+test_lazy_prereq P4D_HAVE_CONFIGURABLE_RUN_MOVE_ALLOW '
+	p4 configure show run.move.allow >out &&
+	egrep ^run.move.allow: out
 '
 
 # If move can be disabled, turn it off and test p4 move handling

@@ -29,9 +29,9 @@ struct object_array {
 /*
  * object flag allocation:
  * revision.h:      0---------10                                26
- * fetch-pack.c:    0---4
+ * fetch-pack.c:    0---5
  * walker.c:        0-2
- * upload-pack.c:               11----------------19
+ * upload-pack.c:       4       11----------------19
  * builtin/blame.c:               12-13
  * bisect.c:                               16
  * bundle.c:                               16
@@ -49,7 +49,7 @@ struct object {
 	unsigned used : 1;
 	unsigned type : TYPE_BITS;
 	unsigned flags : FLAG_BITS;
-	unsigned char sha1[20];
+	struct object_id oid;
 };
 
 extern const char *typename(unsigned int type);

@@ -10,7 +10,7 @@ struct complete_reflogs {
 	char *ref;
 	const char *short_ref;
 	struct reflog_info {
-		unsigned char osha1[20], nsha1[20];
+		struct object_id ooid, noid;
 		char *email;
 		unsigned long timestamp;
 		int tz;
@@ -19,7 +19,7 @@ struct complete_reflogs {
 	int nr, alloc;
 };
 
-static int read_one_reflog(unsigned char *osha1, unsigned char *nsha1,
+static int read_one_reflog(struct object_id *ooid, struct object_id *noid,
 		const char *email, unsigned long timestamp, int tz,
 		const char *message, void *cb_data)
 {
@@ -28,8 +28,8 @@ static int read_one_reflog(unsigned char *osha1, unsigned char *nsha1,
 
 	ALLOC_GROW(array->items, array->nr + 1, array->alloc);
 	item = array->items + array->nr;
-	hashcpy(item->osha1, osha1);
-	hashcpy(item->nsha1, nsha1);
+	oidcpy(&item->ooid, ooid);
+	oidcpy(&item->noid, noid);
 	item->email = xstrdup(email);
 	item->timestamp = timestamp;
 	item->tz = tz;
@@ -45,23 +45,22 @@ static struct complete_reflogs *read_complete_reflog(const char *ref)
 	reflogs->ref = xstrdup(ref);
 	for_each_reflog_ent(ref, read_one_reflog, reflogs);
 	if (reflogs->nr == 0) {
-		unsigned char sha1[20];
+		struct object_id oid;
 		const char *name;
 		void *name_to_free;
 		name = name_to_free = resolve_refdup(ref, RESOLVE_REF_READING,
-						     sha1, NULL);
+						     oid.hash, NULL);
 		if (name) {
 			for_each_reflog_ent(name, read_one_reflog, reflogs);
 			free(name_to_free);
 		}
 	}
 	if (reflogs->nr == 0) {
-		int len = strlen(ref);
-		char *refname = xmalloc(len + 12);
-		sprintf(refname, "refs/%s", ref);
+		char *refname = xstrfmt("refs/%s", ref);
 		for_each_reflog_ent(refname, read_one_reflog, reflogs);
 		if (reflogs->nr == 0) {
-			sprintf(refname, "refs/heads/%s", ref);
+			free(refname);
+			refname = xstrfmt("refs/heads/%s", ref);
 			for_each_reflog_ent(refname, read_one_reflog, reflogs);
 		}
 		free(refname);
@@ -173,18 +172,18 @@ int add_reflog_for_walk(struct reflog_walk_info *info,
 		reflogs = item->util;
 	else {
 		if (*branch == '\0') {
-			unsigned char sha1[20];
+			struct object_id oid;
 			free(branch);
-			branch = resolve_refdup("HEAD", 0, sha1, NULL);
+			branch = resolve_refdup("HEAD", 0, oid.hash, NULL);
 			if (!branch)
 				die ("No current branch");
 
 		}
 		reflogs = read_complete_reflog(branch);
 		if (!reflogs || reflogs->nr == 0) {
-			unsigned char sha1[20];
+			struct object_id oid;
 			char *b;
-			if (dwim_log(branch, strlen(branch), sha1, &b) == 1) {
+			if (dwim_log(branch, strlen(branch), oid.hash, &b) == 1) {
 				if (reflogs) {
 					free(reflogs->ref);
 					free(reflogs);
@@ -222,6 +221,7 @@ void fake_reflog_parent(struct reflog_walk_info *info, struct commit *commit)
 	struct commit_info *commit_info =
 		get_commit_info(commit, &info->reflogs, 0);
 	struct commit_reflog *commit_reflog;
+	struct object *logobj;
 	struct reflog_info *reflog;
 
 	info->last_commit_reflog = NULL;
@@ -233,15 +233,26 @@ void fake_reflog_parent(struct reflog_walk_info *info, struct commit *commit)
 		commit->parents = NULL;
 		return;
 	}
-
-	reflog = &commit_reflog->reflogs->items[commit_reflog->recno];
 	info->last_commit_reflog = commit_reflog;
-	commit_reflog->recno--;
-	commit_info->commit = (struct commit *)parse_object(reflog->osha1);
-	if (!commit_info->commit) {
+
+	do {
+		reflog = &commit_reflog->reflogs->items[commit_reflog->recno];
+		commit_reflog->recno--;
+		logobj = parse_object(reflog->ooid.hash);
+	} while (commit_reflog->recno && (logobj && logobj->type != OBJ_COMMIT));
+
+	if (!logobj && commit_reflog->recno >= 0 && is_null_sha1(reflog->ooid.hash)) {
+		/* a root commit, but there are still more entries to show */
+		reflog = &commit_reflog->reflogs->items[commit_reflog->recno];
+		logobj = parse_object(reflog->noid.hash);
+	}
+
+	if (!logobj || logobj->type != OBJ_COMMIT) {
+		commit_info->commit = NULL;
 		commit->parents = NULL;
 		return;
 	}
+	commit_info->commit = (struct commit *)logobj;
 
 	commit->parents = xcalloc(1, sizeof(struct commit_list));
 	commit->parents->item = commit_info->commit;
@@ -249,7 +260,7 @@ void fake_reflog_parent(struct reflog_walk_info *info, struct commit *commit)
 
 void get_reflog_selector(struct strbuf *sb,
 			 struct reflog_walk_info *reflog_info,
-			 enum date_mode dmode, int force_date,
+			 const struct date_mode *dmode, int force_date,
 			 int shorten)
 {
 	struct commit_reflog *commit_reflog = reflog_info->last_commit_reflog;
@@ -311,7 +322,7 @@ const char *get_reflog_ident(struct reflog_walk_info *reflog_info)
 }
 
 void show_reflog_message(struct reflog_walk_info *reflog_info, int oneline,
-			 enum date_mode dmode, int force_date)
+			 const struct date_mode *dmode, int force_date)
 {
 	if (reflog_info && reflog_info->last_commit_reflog) {
 		struct commit_reflog *commit_reflog = reflog_info->last_commit_reflog;
